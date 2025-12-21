@@ -1,0 +1,110 @@
+name: External Trigger Main
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  external-trigger:
+    runs-on: ubuntu-latest
+    outputs:
+      new_version: ${{ steps.check.outputs.new_version }}
+      ext_release: ${{ steps.check.outputs.ext_release }}
+    steps:
+      - uses: actions/checkout@v4.1.1
+
+      - name: Check for new Pinokio version
+        id: check
+        run: |
+          printf "# External trigger for pinokio-docker\n\n" >> $GITHUB_STEP_SUMMARY
+
+          printf "## Retrieving external version\n\n" >> $GITHUB_STEP_SUMMARY
+          EXT_RELEASE=$(curl -sL "https://api.github.com/repos/pinokiocomputer/pinokio/releases/latest" | jq -r '.tag_name')
+          
+          if [ -z "${EXT_RELEASE}" ] || [ "${EXT_RELEASE}" == "null" ]; then
+            echo "> [!WARNING]" >> $GITHUB_STEP_SUMMARY
+            echo "> Can't retrieve external version, exiting" >> $GITHUB_STEP_SUMMARY
+            exit 1
+          fi
+          
+          echo "Latest Pinokio release: \`${EXT_RELEASE}\`" >> $GITHUB_STEP_SUMMARY
+          EXT_RELEASE_SANITIZED="${EXT_RELEASE#v}"
+          echo "Sanitized external version: \`${EXT_RELEASE_SANITIZED}\`" >> $GITHUB_STEP_SUMMARY
+
+          printf "\n## Retrieving last pushed version\n\n" >> $GITHUB_STEP_SUMMARY
+          
+          # GHCR requires lowercase
+          image="${{ github.repository_owner }}/pinokio-docker"
+          tag="latest"
+          
+          token=$(curl -sX GET \
+            "https://ghcr.io/token?scope=repository%3A${image}%3Apull" \
+            | jq -r '.token')
+          
+          IMAGE_VERSION=""
+          if [ -n "${token}" ] && [ "${token}" != "null" ]; then
+            multidigest=$(curl -s \
+              --header "Accept: application/vnd.docker.distribution.manifest.v2+json" \
+              --header "Accept: application/vnd.oci.image.index.v1+json" \
+              --header "Authorization: Bearer ${token}" \
+              "https://ghcr.io/v2/${image}/manifests/${tag}" 2>/dev/null)
+            
+            if ! echo "${multidigest}" | jq -e '.errors' >/dev/null 2>&1; then
+              if jq -e '.layers // empty' <<< "${multidigest}" >/dev/null 2>&1; then
+                digest=$(jq -r '.config.digest' <<< "${multidigest}")
+              else
+                if jq -e '.manifests[]?.annotations // empty' <<< "${multidigest}" >/dev/null 2>&1; then
+                  multidigest=$(jq 'del(.manifests[] | select(.annotations))' <<< "${multidigest}")
+                fi
+                if [[ $(jq '.manifests | length' <<< "${multidigest}") -gt 1 ]]; then
+                  multidigest=$(jq -r ".manifests[] | select(.platform.architecture == \"amd64\").digest?" <<< "${multidigest}")
+                else
+                  multidigest=$(jq -r ".manifests[].digest?" <<< "${multidigest}")
+                fi
+                digest=$(curl -s \
+                  --header "Accept: application/vnd.docker.distribution.manifest.v2+json" \
+                  --header "Accept: application/vnd.oci.image.manifest.v1+json" \
+                  --header "Authorization: Bearer ${token}" \
+                  "https://ghcr.io/v2/${image}/manifests/${multidigest}" | jq -r '.config.digest')
+              fi
+              
+              image_info=$(curl -sL \
+                --header "Authorization: Bearer ${token}" \
+                "https://ghcr.io/v2/${image}/blobs/${digest}" 2>/dev/null)
+              
+              if [[ $(echo $image_info | jq -r '.container_config') == "null" ]]; then
+                image_info=$(echo $image_info | jq -r '.config')
+              else
+                image_info=$(echo $image_info | jq -r '.container_config')
+              fi
+              
+              # Extract version without -J suffix
+              IMAGE_VERSION=$(echo ${image_info} | jq -r '.Labels."org.opencontainers.image.version"' 2>/dev/null | sed 's/-J[0-9]*$//')
+            fi
+          fi
+          
+          if [ -z "${IMAGE_VERSION}" ]; then
+            echo "No previous version found, will trigger build." >> $GITHUB_STEP_SUMMARY
+            echo "new_version=true" >> $GITHUB_OUTPUT
+            echo "ext_release=${EXT_RELEASE}" >> $GITHUB_OUTPUT
+          elif [ "${EXT_RELEASE_SANITIZED}" == "${IMAGE_VERSION}" ]; then
+            echo "Version \`${EXT_RELEASE_SANITIZED}\` already built, exiting." >> $GITHUB_STEP_SUMMARY
+            echo "new_version=false" >> $GITHUB_OUTPUT
+          else
+            printf "\n## Trigger new build\n\n" >> $GITHUB_STEP_SUMMARY
+            echo "New version \`${EXT_RELEASE_SANITIZED}\` found; old version was \`${IMAGE_VERSION}\`. Triggering new build." >> $GITHUB_STEP_SUMMARY
+            echo "new_version=true" >> $GITHUB_OUTPUT
+            echo "ext_release=${EXT_RELEASE}" >> $GITHUB_OUTPUT
+          fi
+
+  trigger-build:
+    needs: external-trigger
+    if: needs.external-trigger.outputs.new_version == 'true'
+    uses: ./.github/workflows/docker-build.yml
+    with:
+      version: ${{ needs.external-trigger.outputs.ext_release }}
+      increment_build: false
+    secrets: inherit

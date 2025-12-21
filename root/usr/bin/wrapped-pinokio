@@ -1,0 +1,20 @@
+#!/bin/bash
+BIN=/opt/Pinokio/pinokio
+
+while true; do
+  # Kill any existing instances of the app
+  pkill -f "$BIN" 2>/dev/null
+  
+  unset DBUS_SESSION_BUS_ADDRESS
+  # Start the app
+  "$BIN" \
+    --no-sandbox \
+    --disable-gpu \
+    --disable-software-rasterizer \
+    --ozone-platform=x11 \
+    --start-maximized \
+    "$@" > /dev/null 2>&1
+
+  # Small delay before restarting to avoid tight crash loops
+  sleep 2
+done
