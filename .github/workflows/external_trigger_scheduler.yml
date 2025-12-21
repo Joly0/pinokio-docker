@@ -1,0 +1,25 @@
+name: External Trigger Scheduler
+
+on:
+  schedule:
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  packages: write
+  actions: write
+
+jobs:
+  external-trigger-scheduler:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger external version check
+        run: |
+          printf "# External trigger scheduler for pinokio-docker\n\n" >> $GITHUB_STEP_SUMMARY
+          echo "Triggering external trigger workflow for main branch." >> $GITHUB_STEP_SUMMARY
+          curl -iX POST \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            -d '{"ref":"refs/heads/main"}' \
+            https://api.github.com/repos/${{ github.repository }}/actions/workflows/external_trigger.yml/dispatches

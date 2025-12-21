@@ -1,0 +1,5 @@
+#!/bin/bash
+
+/usr/bin/pinokio-config-init.sh &
+
+wrapped-pinokio ${PINOKIO_CLI}

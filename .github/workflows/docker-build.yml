@@ -1,0 +1,188 @@
+name: Docker Build
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'BUILD_NUMBER'
+      - '*.md'
+      - '.github/workflows/call_issue*.yml'
+      - '.github/workflows/greetings.yml'
+      - '.github/ISSUE_TEMPLATE/**'
+      - '.github/PULL_REQUEST_TEMPLATE.md'
+      - 'LICENSE'
+  workflow_call:
+    inputs:
+      version:
+        description: 'Version to build'
+        required: false
+        type: string
+      increment_build:
+        description: 'Whether to increment build number'
+        required: false
+        type: boolean
+        default: true
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to build (e.g., v5.1.10). Leave empty for latest.'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  GHCR_REGISTRY: ghcr.io
+  DOCKERHUB_REGISTRY: docker.io
+  GHCR_IMAGE_NAME: ${{ github.repository_owner }}/pinokio-docker
+  DOCKERHUB_IMAGE_NAME: joly0/pinokio-docker
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4.1.1
+        with:
+          fetch-depth: 0
+
+      - name: Set image names
+        id: image
+        run: |
+          # GHCR requires lowercase
+          GHCR_IMAGE=$(echo "${{ github.repository_owner }}/pinokio-docker" | tr '[:upper:]' '[:lower:]')
+          echo "ghcr_image=${GHCR_IMAGE}" >> $GITHUB_OUTPUT
+
+      - name: Get version and build number
+        id: version
+        run: |
+          # Get Pinokio version
+          if [ -n "${{ inputs.version }}" ]; then
+            VERSION="${{ inputs.version }}"
+          else
+            VERSION=$(curl -sL "https://api.github.com/repos/pinokiocomputer/pinokio/releases/latest" | jq -r '.tag_name')
+          fi
+          VERSION_SANITIZED="${VERSION#v}"
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "version_sanitized=${VERSION_SANITIZED}" >> $GITHUB_OUTPUT
+          
+          # Parse major.minor.patch
+          MAJOR=$(echo "${VERSION_SANITIZED}" | cut -d. -f1)
+          MINOR=$(echo "${VERSION_SANITIZED}" | cut -d. -f2)
+          echo "major=${MAJOR}" >> $GITHUB_OUTPUT
+          echo "minor=${MAJOR}.${MINOR}" >> $GITHUB_OUTPUT
+          
+          # Get current build number from file
+          if [ -f BUILD_NUMBER ]; then
+            source BUILD_NUMBER
+          else
+            BUILD_NUMBER=0
+          fi
+          BUILD_NUM=${BUILD_NUMBER}
+          
+          # Determine if we should increment
+          SHOULD_INCREMENT="${{ inputs.increment_build }}"
+          if [ "${{ github.event_name }}" == "push" ]; then
+            SHOULD_INCREMENT="true"
+          elif [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            SHOULD_INCREMENT="true"
+          fi
+          
+          if [ "${SHOULD_INCREMENT}" == "true" ]; then
+            BUILD_NUM=$((BUILD_NUM + 1))
+          fi
+          
+          # Write updated BUILD_NUMBER file
+          cat > BUILD_NUMBER << EOF
+          PINOKIO_VERSION=${VERSION_SANITIZED}
+          BUILD_NUMBER=${BUILD_NUM}
+          EOF
+          sed -i 's/^[[:space:]]*//' BUILD_NUMBER
+          
+          echo "build_number=${BUILD_NUM}" >> $GITHUB_OUTPUT
+          echo "full_version=${VERSION_SANITIZED}-J${BUILD_NUM}" >> $GITHUB_OUTPUT
+          
+          # Summary
+          echo "## Build Info" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- Pinokio version: \`${VERSION_SANITIZED}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- Build number: \`J${BUILD_NUM}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- Full version: \`${VERSION_SANITIZED}-J${BUILD_NUM}\`" >> $GITHUB_STEP_SUMMARY
+
+      - name: Make scripts executable
+        run: |
+          echo "Making scripts in root/ executable..." >> $GITHUB_STEP_SUMMARY
+          find root/ -type f \( -name "run" -o -name "finish" -o -name "check" \) -exec chmod +x {} \;
+          find root/ -path "*/usr/bin/*" -type f -exec chmod +x {} \;
+          find root/ -type f -name "*.sh" -exec chmod +x {} \;
+          echo "Done." >> $GITHUB_STEP_SUMMARY
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.GHCR_REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.DOCKERHUB_REGISTRY }}
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64
+          tags: |
+            ${{ env.GHCR_REGISTRY }}/${{ steps.image.outputs.ghcr_image }}:latest
+            ${{ env.GHCR_REGISTRY }}/${{ steps.image.outputs.ghcr_image }}:${{ steps.version.outputs.version_sanitized }}
+            ${{ env.GHCR_REGISTRY }}/${{ steps.image.outputs.ghcr_image }}:${{ steps.version.outputs.full_version }}
+            ${{ env.GHCR_REGISTRY }}/${{ steps.image.outputs.ghcr_image }}:${{ steps.version.outputs.minor }}
+            ${{ env.GHCR_REGISTRY }}/${{ steps.image.outputs.ghcr_image }}:${{ steps.version.outputs.major }}
+            ${{ env.DOCKERHUB_REGISTRY }}/${{ env.DOCKERHUB_IMAGE_NAME }}:latest
+            ${{ env.DOCKERHUB_REGISTRY }}/${{ env.DOCKERHUB_IMAGE_NAME }}:${{ steps.version.outputs.version_sanitized }}
+            ${{ env.DOCKERHUB_REGISTRY }}/${{ env.DOCKERHUB_IMAGE_NAME }}:${{ steps.version.outputs.full_version }}
+            ${{ env.DOCKERHUB_REGISTRY }}/${{ env.DOCKERHUB_IMAGE_NAME }}:${{ steps.version.outputs.minor }}
+            ${{ env.DOCKERHUB_REGISTRY }}/${{ env.DOCKERHUB_IMAGE_NAME }}:${{ steps.version.outputs.major }}
+          labels: |
+            org.opencontainers.image.title=Pinokio Docker
+            org.opencontainers.image.description=Pinokio AI browser in Docker
+            org.opencontainers.image.version=${{ steps.version.outputs.full_version }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          build-args: |
+            PINOKIO_VERSION=${{ steps.version.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Commit updated build number
+        if: success()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # Stash any unstaged changes (like chmod modifications)
+          git stash --include-untracked || true
+          
+          # Pull latest changes
+          git pull --rebase origin main || true
+          
+          # Pop stash if exists
+          git stash pop || true
+          
+          # Now commit BUILD_NUMBER
+          git add BUILD_NUMBER
+          if git diff --staged --quiet; then
+            echo "No changes to BUILD_NUMBER"
+          else
+            git commit -m "Update BUILD_NUMBER to J${{ steps.version.outputs.build_number }} [skip ci]"
+            git push
+          fi

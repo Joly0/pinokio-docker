@@ -1,0 +1,17 @@
+name: Weekly Rebuild
+
+on:
+  schedule:
+    - cron: '0 4 * * 3'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  weekly-rebuild:
+    uses: ./.github/workflows/docker-build.yml
+    with:
+      increment_build: true
+    secrets: inherit
