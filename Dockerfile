@@ -10,6 +10,8 @@ ENV TITLE=Pinokio
 ENV PINOKIO_SHARE_LOCAL=true
 ENV PINOKIO_SHARE_LOCAL_PORT=50000
 
+ARG PINOKIO_VERSION
+
 RUN \
   echo "**** install packages ****" && \
   apt-get update && \
