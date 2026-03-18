@@ -4,28 +4,33 @@ on:
   push:
     branches: [main]
     paths-ignore:
-      - 'BUILD_NUMBER'
-      - '*.md'
-      - '.github/workflows/call_issue*.yml'
-      - '.github/workflows/greetings.yml'
-      - '.github/ISSUE_TEMPLATE/**'
-      - '.github/PULL_REQUEST_TEMPLATE.md'
-      - 'LICENSE'
+      - "BUILD_NUMBER"
+      - "*.md"
+      - ".github/**"
+      - "LICENSE"
+      - ".gitignore"
+      - ".vscode/**"
+      - "readme-vars.yml"
   workflow_call:
     inputs:
       version:
-        description: 'Version to build'
+        description: "Version to build"
         required: false
         type: string
       increment_build:
-        description: 'Whether to increment build number'
+        description: "Whether to increment build number"
         required: false
         type: boolean
         default: true
+      skip_if_unchanged:
+        description: "Skip push if image is identical to current latest"
+        required: false
+        type: boolean
+        default: false
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version to build (e.g., v5.1.10). Leave empty for latest.'
+        description: "Version to build (e.g., v5.1.10). Leave empty for latest."
         required: false
         type: string
 
@@ -34,110 +39,180 @@ permissions:
   packages: write
 
 env:
+  # --- Customize these per repo ---
+  UPSTREAM_REPO: pinokiocomputer/pinokio
+  IMAGE_TITLE: Pinokio Docker
+  IMAGE_DESCRIPTION: Pinokio AI browser in Docker
+  DOCKERHUB_IMAGE: joly0/pinokio-docker
+  BUILD_ARG_NAME: PINOKIO_VERSION
+  BUILD_PREFIX: J
+  # --------------------------------
   GHCR_REGISTRY: ghcr.io
   DOCKERHUB_REGISTRY: docker.io
-  GHCR_IMAGE_NAME: ${{ github.repository_owner }}/pinokio-docker
-  DOCKERHUB_IMAGE_NAME: joly0/pinokio-docker
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4.1.1
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Set image names
+      - name: Set image name
         id: image
         run: |
-          # GHCR requires lowercase
-          GHCR_IMAGE=$(echo "${{ github.repository_owner }}/pinokio-docker" | tr '[:upper:]' '[:lower:]')
+          GHCR_IMAGE=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
           echo "ghcr_image=${GHCR_IMAGE}" >> $GITHUB_OUTPUT
 
       - name: Get version and build number
         id: version
         run: |
-          # Get Pinokio version
+          # Get upstream version
           if [ -n "${{ inputs.version }}" ]; then
             VERSION="${{ inputs.version }}"
           else
-            VERSION=$(curl -sL "https://api.github.com/repos/pinokiocomputer/pinokio/releases/latest" | jq -r '.tag_name')
+            VERSION=$(curl -sL "https://api.github.com/repos/${{ env.UPSTREAM_REPO }}/releases/latest" | jq -r '.tag_name')
           fi
           VERSION_SANITIZED="${VERSION#v}"
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
           echo "version_sanitized=${VERSION_SANITIZED}" >> $GITHUB_OUTPUT
-          
-          # Parse major.minor.patch
+
+          # Parse major.minor
           MAJOR=$(echo "${VERSION_SANITIZED}" | cut -d. -f1)
           MINOR=$(echo "${VERSION_SANITIZED}" | cut -d. -f2)
           echo "major=${MAJOR}" >> $GITHUB_OUTPUT
           echo "minor=${MAJOR}.${MINOR}" >> $GITHUB_OUTPUT
-          
-          # Get current build number from file
+
+          # Get current build number
           if [ -f BUILD_NUMBER ]; then
             source BUILD_NUMBER
           else
             BUILD_NUMBER=0
           fi
           BUILD_NUM=${BUILD_NUMBER}
-          
+
           # Determine if we should increment
           SHOULD_INCREMENT="${{ inputs.increment_build }}"
-          if [ "${{ github.event_name }}" == "push" ]; then
-            SHOULD_INCREMENT="true"
-          elif [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+          if [ "${{ github.event_name }}" == "push" ] || [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
             SHOULD_INCREMENT="true"
           fi
-          
+
           if [ "${SHOULD_INCREMENT}" == "true" ]; then
             BUILD_NUM=$((BUILD_NUM + 1))
           fi
-          
+
           # Write updated BUILD_NUMBER file
-          cat > BUILD_NUMBER << EOF
-          PINOKIO_VERSION=${VERSION_SANITIZED}
-          BUILD_NUMBER=${BUILD_NUM}
-          EOF
-          sed -i 's/^[[:space:]]*//' BUILD_NUMBER
-          
+          printf '%s=%s\n' "${BUILD_ARG_NAME}" "${VERSION_SANITIZED}" > BUILD_NUMBER
+          printf 'BUILD_NUMBER=%s\n' "${BUILD_NUM}" >> BUILD_NUMBER
+
           echo "build_number=${BUILD_NUM}" >> $GITHUB_OUTPUT
-          echo "full_version=${VERSION_SANITIZED}-J${BUILD_NUM}" >> $GITHUB_OUTPUT
-          
+          echo "full_version=${VERSION_SANITIZED}-${{ env.BUILD_PREFIX }}${BUILD_NUM}" >> $GITHUB_OUTPUT
+
           # Summary
           echo "## Build Info" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "- Pinokio version: \`${VERSION_SANITIZED}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- Build number: \`J${BUILD_NUM}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- Full version: \`${VERSION_SANITIZED}-J${BUILD_NUM}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- Version: \`${VERSION_SANITIZED}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- Build: \`${{ env.BUILD_PREFIX }}${BUILD_NUM}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- Full: \`${VERSION_SANITIZED}-${{ env.BUILD_PREFIX }}${BUILD_NUM}\`" >> $GITHUB_STEP_SUMMARY
 
       - name: Make scripts executable
         run: |
-          echo "Making scripts in root/ executable..." >> $GITHUB_STEP_SUMMARY
-          find root/ -type f \( -name "run" -o -name "finish" -o -name "check" \) -exec chmod +x {} \;
-          find root/ -path "*/usr/bin/*" -type f -exec chmod +x {} \;
-          find root/ -type f -name "*.sh" -exec chmod +x {} \;
-          echo "Done." >> $GITHUB_STEP_SUMMARY
+          if [ -d root/ ]; then
+            find root/ -type f \( -name "run" -o -name "finish" -o -name "check" \) -exec chmod +x {} \;
+            find root/ -path "*/usr/bin/*" -type f -exec chmod +x {} \;
+            find root/ -type f -name "*.sh" -exec chmod +x {} \;
+          fi
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ${{ env.GHCR_REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Log in to Docker Hub
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ${{ env.DOCKERHUB_REGISTRY }}
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build and push Docker image
-        uses: docker/build-push-action@v5
+      - name: Get remote image digest
+        id: remote
+        if: inputs.skip_if_unchanged
+        run: |
+          GHCR_IMAGE="${{ steps.image.outputs.ghcr_image }}"
+          # Fetch the config digest of the current :latest image
+          TOKEN=$(curl -s "https://ghcr.io/token?scope=repository%3A${GHCR_IMAGE}%3Apull" | jq -r '.token // empty')
+          REMOTE_DIGEST=""
+          if [ -n "${TOKEN}" ]; then
+            # Get manifest (handle manifest list or single manifest)
+            MANIFEST=$(curl -s \
+              -H "Accept: application/vnd.oci.image.index.v1+json" \
+              -H "Accept: application/vnd.docker.distribution.manifest.v2+json" \
+              -H "Authorization: Bearer ${TOKEN}" \
+              "https://ghcr.io/v2/${GHCR_IMAGE}/manifests/latest" 2>/dev/null)
+
+            if ! echo "${MANIFEST}" | jq -e '.errors' >/dev/null 2>&1; then
+              # If it's a manifest list, get the amd64 manifest first
+              if echo "${MANIFEST}" | jq -e '.manifests' >/dev/null 2>&1; then
+                AMD64_DIGEST=$(echo "${MANIFEST}" | jq -r '.manifests[] | select(.platform.architecture == "amd64" and (.annotations // {} | has("vnd.docker.reference.digest") | not)) | .digest' | head -1)
+                if [ -n "${AMD64_DIGEST}" ]; then
+                  MANIFEST=$(curl -s \
+                    -H "Accept: application/vnd.oci.image.manifest.v1+json" \
+                    -H "Accept: application/vnd.docker.distribution.manifest.v2+json" \
+                    -H "Authorization: Bearer ${TOKEN}" \
+                    "https://ghcr.io/v2/${GHCR_IMAGE}/manifests/${AMD64_DIGEST}" 2>/dev/null)
+                fi
+              fi
+              REMOTE_DIGEST=$(echo "${MANIFEST}" | jq -r '.config.digest // empty')
+            fi
+          fi
+          echo "digest=${REMOTE_DIGEST}" >> $GITHUB_OUTPUT
+          echo "Remote config digest: \`${REMOTE_DIGEST:-not found}\`" >> $GITHUB_STEP_SUMMARY
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v7
+        id: build
+        with:
+          context: .
+          load: true
+          platforms: linux/amd64
+          tags: local-build:check
+          build-args: |
+            ${{ env.BUILD_ARG_NAME }}=${{ steps.version.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Check if image changed
+        id: diff
+        run: |
+          SKIP_IF_UNCHANGED="${{ inputs.skip_if_unchanged }}"
+          if [ "${SKIP_IF_UNCHANGED}" != "true" ]; then
+            echo "changed=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          LOCAL_DIGEST="sha256:$(docker image inspect local-build:check --format '{{.Id}}' | sed 's/sha256://')"
+          REMOTE_DIGEST="${{ steps.remote.outputs.digest }}"
+
+          echo "Local config digest:  ${LOCAL_DIGEST}" >> $GITHUB_STEP_SUMMARY
+          echo "Remote config digest: ${REMOTE_DIGEST:-none}" >> $GITHUB_STEP_SUMMARY
+
+          if [ -n "${REMOTE_DIGEST}" ] && [ "${LOCAL_DIGEST}" == "${REMOTE_DIGEST}" ]; then
+            echo "Image unchanged, skipping push." >> $GITHUB_STEP_SUMMARY
+            echo "changed=false" >> $GITHUB_OUTPUT
+          else
+            echo "Image changed, will push." >> $GITHUB_STEP_SUMMARY
+            echo "changed=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Push Docker image
+        if: steps.diff.outputs.changed == 'true'
+        uses: docker/build-push-action@v7
         with:
           context: .
           push: true
@@ -148,41 +223,35 @@ jobs:
             ${{ env.GHCR_REGISTRY }}/${{ steps.image.outputs.ghcr_image }}:${{ steps.version.outputs.full_version }}
             ${{ env.GHCR_REGISTRY }}/${{ steps.image.outputs.ghcr_image }}:${{ steps.version.outputs.minor }}
             ${{ env.GHCR_REGISTRY }}/${{ steps.image.outputs.ghcr_image }}:${{ steps.version.outputs.major }}
-            ${{ env.DOCKERHUB_REGISTRY }}/${{ env.DOCKERHUB_IMAGE_NAME }}:latest
-            ${{ env.DOCKERHUB_REGISTRY }}/${{ env.DOCKERHUB_IMAGE_NAME }}:${{ steps.version.outputs.version_sanitized }}
-            ${{ env.DOCKERHUB_REGISTRY }}/${{ env.DOCKERHUB_IMAGE_NAME }}:${{ steps.version.outputs.full_version }}
-            ${{ env.DOCKERHUB_REGISTRY }}/${{ env.DOCKERHUB_IMAGE_NAME }}:${{ steps.version.outputs.minor }}
-            ${{ env.DOCKERHUB_REGISTRY }}/${{ env.DOCKERHUB_IMAGE_NAME }}:${{ steps.version.outputs.major }}
+            ${{ env.DOCKERHUB_REGISTRY }}/${{ env.DOCKERHUB_IMAGE }}:latest
+            ${{ env.DOCKERHUB_REGISTRY }}/${{ env.DOCKERHUB_IMAGE }}:${{ steps.version.outputs.version_sanitized }}
+            ${{ env.DOCKERHUB_REGISTRY }}/${{ env.DOCKERHUB_IMAGE }}:${{ steps.version.outputs.full_version }}
+            ${{ env.DOCKERHUB_REGISTRY }}/${{ env.DOCKERHUB_IMAGE }}:${{ steps.version.outputs.minor }}
+            ${{ env.DOCKERHUB_REGISTRY }}/${{ env.DOCKERHUB_IMAGE }}:${{ steps.version.outputs.major }}
           labels: |
-            org.opencontainers.image.title=Pinokio Docker
-            org.opencontainers.image.description=Pinokio AI browser in Docker
+            org.opencontainers.image.title=${{ env.IMAGE_TITLE }}
+            org.opencontainers.image.description=${{ env.IMAGE_DESCRIPTION }}
             org.opencontainers.image.version=${{ steps.version.outputs.full_version }}
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
           build-args: |
-            PINOKIO_VERSION=${{ steps.version.outputs.version }}
+            ${{ env.BUILD_ARG_NAME }}=${{ steps.version.outputs.version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
       - name: Commit updated build number
-        if: success()
+        if: success() && steps.diff.outputs.changed == 'true'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          
-          # Stash any unstaged changes (like chmod modifications)
+
           git stash --include-untracked || true
-          
-          # Pull latest changes
           git pull --rebase origin main || true
-          
-          # Pop stash if exists
           git stash pop || true
-          
-          # Now commit BUILD_NUMBER
+
           git add BUILD_NUMBER
           if git diff --staged --quiet; then
             echo "No changes to BUILD_NUMBER"
           else
-            git commit -m "Update BUILD_NUMBER to J${{ steps.version.outputs.build_number }} [skip ci]"
+            git commit -m "Update BUILD_NUMBER to ${{ env.BUILD_PREFIX }}${{ steps.version.outputs.build_number }} [skip ci]"
             git push
           fi

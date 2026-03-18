@@ -1,12 +1,53 @@
 name: Permission check
+
 on:
   pull_request_target:
     paths:
-      - '**/run'
-      - '**/finish'
-      - '**/check'
-      - 'root/migrations/*'
+      - "**/run"
+      - "**/finish"
+      - "**/check"
+      - "root/migrations/*"
+
+permissions:
+  pull-requests: write
 
 jobs:
   permission_check:
-    uses: linuxserver/github-workflows/.github/workflows/init-svc-executable-permissions.yml@v1
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Check executable permissions on init services
+        id: check
+        run: |
+          FAILED=false
+          echo "## Permission Check Results" >> $GITHUB_STEP_SUMMARY
+
+          while IFS= read -r -d '' file; do
+            if [ ! -x "$file" ]; then
+              echo "- :x: \`${file}\` is not executable" >> $GITHUB_STEP_SUMMARY
+              FAILED=true
+            else
+              echo "- :white_check_mark: \`${file}\` is executable" >> $GITHUB_STEP_SUMMARY
+            fi
+          done < <(find root/ -type f \( -name "run" -o -name "finish" -o -name "check" \) -print0 2>/dev/null)
+
+          if [ "${FAILED}" == "true" ]; then
+            echo "::error::Some init service files are missing executable permissions"
+            exit 1
+          fi
+
+      - name: Comment on failure
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body: '⚠️ Some init service files (`run`, `finish`, `check`) are missing executable permissions. Please run `chmod +x` on them.'
+            });

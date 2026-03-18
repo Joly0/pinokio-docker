@@ -1,0 +1,92 @@
+name: Scheduled Builds
+
+on:
+  schedule:
+    # Check for new upstream releases every 6 hours
+    - cron: "17 */6 * * *"
+    # Weekly rebuild (Wednesday 4am UTC)
+    - cron: "0 4 * * 3"
+  workflow_dispatch:
+    inputs:
+      force_rebuild:
+        description: "Force rebuild even if version unchanged"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  packages: write
+  actions: write
+
+env:
+  UPSTREAM_REPO: pinokiocomputer/pinokio
+
+jobs:
+  check-and-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for new upstream version
+        id: check
+        run: |
+          IS_WEEKLY="${{ github.event.schedule == '0 4 * * 3' }}"
+          FORCE="${{ inputs.force_rebuild }}"
+
+          printf "# Scheduled build check\n\n" >> $GITHUB_STEP_SUMMARY
+
+          # Get latest upstream release
+          EXT_RELEASE=$(curl -sL "https://api.github.com/repos/${{ env.UPSTREAM_REPO }}/releases/latest" | jq -r '.tag_name')
+          if [ -z "${EXT_RELEASE}" ] || [ "${EXT_RELEASE}" == "null" ]; then
+            echo "> [!WARNING]" >> $GITHUB_STEP_SUMMARY
+            echo "> Cannot retrieve upstream version, exiting" >> $GITHUB_STEP_SUMMARY
+            exit 1
+          fi
+          EXT_RELEASE_SANITIZED="${EXT_RELEASE#v}"
+          echo "Latest upstream: \`${EXT_RELEASE}\`" >> $GITHUB_STEP_SUMMARY
+
+          # Get currently built version from BUILD_NUMBER file
+          CURRENT_VERSION=""
+          if [ -f BUILD_NUMBER ]; then
+            source BUILD_NUMBER
+            # The first variable in BUILD_NUMBER holds the version
+            CURRENT_VERSION=$(head -1 BUILD_NUMBER | cut -d= -f2)
+          fi
+          echo "Current built version: \`${CURRENT_VERSION}\`" >> $GITHUB_STEP_SUMMARY
+
+          # Decide whether to build
+          if [ "${FORCE}" == "true" ]; then
+            echo "Forced rebuild requested." >> $GITHUB_STEP_SUMMARY
+            echo "should_build=true" >> $GITHUB_OUTPUT
+            echo "version=${EXT_RELEASE}" >> $GITHUB_OUTPUT
+            echo "increment=true" >> $GITHUB_OUTPUT
+          elif [ "${IS_WEEKLY}" == "true" ]; then
+            echo "Weekly rebuild triggered." >> $GITHUB_STEP_SUMMARY
+            echo "should_build=true" >> $GITHUB_OUTPUT
+            echo "version=${EXT_RELEASE}" >> $GITHUB_OUTPUT
+            echo "increment=true" >> $GITHUB_OUTPUT
+          elif [ "${EXT_RELEASE_SANITIZED}" != "${CURRENT_VERSION}" ]; then
+            echo "New version found: \`${EXT_RELEASE_SANITIZED}\` (was \`${CURRENT_VERSION}\`)." >> $GITHUB_STEP_SUMMARY
+            echo "should_build=true" >> $GITHUB_OUTPUT
+            echo "version=${EXT_RELEASE}" >> $GITHUB_OUTPUT
+            echo "increment=false" >> $GITHUB_OUTPUT
+          else
+            echo "Version \`${EXT_RELEASE_SANITIZED}\` already built. Nothing to do." >> $GITHUB_STEP_SUMMARY
+            echo "should_build=false" >> $GITHUB_OUTPUT
+          fi
+
+    outputs:
+      should_build: ${{ steps.check.outputs.should_build }}
+      version: ${{ steps.check.outputs.version }}
+      increment: ${{ steps.check.outputs.increment }}
+
+  trigger-build:
+    needs: check-and-build
+    if: needs.check-and-build.outputs.should_build == 'true'
+    uses: ./.github/workflows/docker-build.yml
+    with:
+      version: ${{ needs.check-and-build.outputs.version }}
+      increment_build: ${{ needs.check-and-build.outputs.increment == 'true' }}
+      skip_if_unchanged: ${{ needs.check-and-build.outputs.increment == 'true' }}
+    secrets: inherit
